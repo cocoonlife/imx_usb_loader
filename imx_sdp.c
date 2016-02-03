@@ -140,6 +140,7 @@ char const *conf_path_ok(char const *conf_path, char const *conf_file)
 
 	strncpy(conf, conf_path, sizeof(conf));
 	strncat(conf, conf_file, sizeof(conf));
+	dbg_printf("access: %s", conf);
 	if (access(conf, R_OK) != -1) {
 		printf("config file <%s>\n", conf);
 		return conf;
@@ -648,6 +649,66 @@ static int write_memory(struct sdp_dev *dev, unsigned addr, unsigned val)
 	return err;
 }
 
+int load_dcd(struct sdp_dev *dev,
+		unsigned char *p, unsigned size, unsigned dladdr)
+{
+	struct sdp_command dl_command = {
+		.cmd = SDP_WRITE_DCD,
+		.addr = BE32(dladdr),
+		.format = 0x00,
+		.cnt = BE32(size),
+		.data = 0,
+		.rsvd = 0xaa};
+//							address, format, data count, data, type
+	unsigned int *status;
+	int last_trans, err;
+	int retry = 0;
+	unsigned char tmp[64];
+
+	for (;;) {
+		err = dev->transfer(dev, 1, (char *)&dl_command, sizeof(dl_command), 0, &last_trans);
+		if (!err)
+			break;
+		printf("load_dcd err=%i, last_trans=%i\n", err, last_trans);
+		if (retry > 5)
+			return -4;
+		retry++;
+	}
+	retry = 0;
+	if (dev->mode == MODE_BULK) {
+		err = dev->transfer(dev, 3, tmp, sizeof(tmp), 4, &last_trans);
+		if (err)
+			printf("in err=%i, last_trans=%i  %02x %02x %02x %02x\n", err, last_trans, tmp[0], tmp[1], tmp[2], tmp[3]);
+	}
+
+	for (;;) {
+		err = dev->transfer(dev, 2, p, size, 0, &last_trans);
+		if (!err)
+			break;		printf("out err=%i, last_trans=%i size=0x%x\n", err, last_trans, size);
+		printf("out err=%i, last_trans=%i size=0x%x\n", err, last_trans, size);
+		if (retry > 5)
+			return err;
+		retry++;
+	}
+	dbg_printf("loaded dcd 0x%x@0x%x\r\n", size, dladdr);
+	if (dev->mode == MODE_HID) {
+		err = dev->transfer(dev, 3, tmp, sizeof(tmp), 4, &last_trans);
+		if (err)
+			printf("report 3 in err=%i, last_trans=%i  %02x %02x %02x %02x\n", err, last_trans, tmp[0], tmp[1], tmp[2], tmp[3]);
+		err = dev->transfer(dev, 4, tmp, sizeof(tmp), 4, &last_trans);
+		if (err)
+			printf("report 4 in err=%i, last_trans=%i  %02x %02x %02x %02x\n", err, last_trans, tmp[0], tmp[1], tmp[2], tmp[3]);
+		status = (unsigned int*)tmp;
+		if (*status == 0x128a8a12UL)
+			printf("succeeded (status 0x%08x)\n", *status);
+		else
+			printf("failed (status 0x%08x)\n", *status);
+	} else {
+		do_status(dev);
+	}
+	return size;
+}
+
 void perform_mem_work(struct sdp_dev *dev, struct mem_work *mem)
 {
 	unsigned tmp, tmp2;
@@ -692,7 +753,7 @@ static int write_dcd_table_ivt(struct sdp_dev *dev, struct ivt_header *hdr, unsi
 	}
 	m_length = (dcd[1] << 8) + dcd[2];
 	printf("main dcd length %x\n", m_length);
-	if ((dcd[0] != 0xd2) || (dcd[3] != 0x40)) {
+	if ((dcd[0] != 0xd2) || (dcd[3] != 0x40 && dcd[3] != 0x41)) {
 		printf("Unknown tag\n");
 		return -1;
 	}
@@ -701,89 +762,7 @@ static int write_dcd_table_ivt(struct sdp_dev *dev, struct ivt_header *hdr, unsi
 		printf("bad dcd length %08x\n", m_length);
 		return -1;
 	}
-	dcd += 4;
-	while (dcd < dcd_end) {
-		unsigned s_length = (dcd[1] << 8) + dcd[2];
-		unsigned sub_tag = (dcd[0] << 24) + (dcd[3] & 0x7);
-		unsigned flags = (dcd[3] & 0xf8);
-		unsigned char *s_end = dcd + s_length;
-		printf("sub dcd length %x\n", s_length);
-		switch(sub_tag) {
-		/* Write Data Command */
-		case 0xcc000004:
-			if (flags & 0xe8) {
-				printf("error: Write Data Command with unsupported flags, flags %x.\n", flags);
-				return -1;
-			}
-			dcd += 4;
-			if (s_end > dcd_end) {
-				printf("error s_end(%p) > dcd_end(%p)\n", s_end, dcd_end);
-				return -1;
-			}
-			while (dcd < s_end) {
-				unsigned addr = (dcd[0] << 24) + (dcd[1] << 16) | (dcd[2] << 8) + dcd[3];
-				unsigned val = (dcd[4] << 24) + (dcd[5] << 16) | (dcd[6] << 8) + dcd[7];
-				dcd += 8;
-				dbg_printf("write data *0x%08x = 0x%08x\n", addr, val);
-				err = write_memory(dev, addr, val);
-				if (err < 0)
-					return err;
-			}
-			break;
-		/* Check Data Command */
-		case 0xcf000004: {
-			unsigned addr, count, mask, val;
-			dcd += 4;
-			addr = (dcd[0] << 24) + (dcd[1] << 16) | (dcd[2] << 8) + dcd[3];
-			mask = (dcd[4] << 24) + (dcd[5] << 16) | (dcd[6] << 8) + dcd[7];
-			count = 10000;
-			switch (s_length) {
-			case 12:
-				dcd += 8;
-				break;
-			case 16:
-				count = (dcd[8] << 24) + (dcd[9] << 16) | (dcd[10] << 8) + dcd[11];
-				dcd += 12;
-				break;
-			default:
-				printf("error s_end(%p) > dcd_end(%p)\n", s_end, dcd_end);
-				return -1;
-			}
-			dbg_printf("Check Data Command, at addr %x, mask %x\n",addr, mask);
-			while (count) {
-				val = 0;
-				err = read_memory(dev, addr, (unsigned char*)&val, 4);
-				if (err < 0) {
-					printf("Check Data Command(%x) error(%d) @%x=%x mask %x\n", flags, err, addr, val, mask);
-					return err;
-				}
-				if ((flags == 0x00) && ((val & mask) == 0) )
-					break;
-				else if ((flags == 0x08) && ((val & mask) != mask) )
-					break;
-				else if ((flags == 0x10) && ((val & mask) == mask) )
-					break;
-				else if ((flags == 0x18) && ((val & mask) != 0) )
-					break;
-				else if (flags & 0xe0) {
-					printf("error: Check Data Command with unsupported flags, flags %x.\n", flags);
-					return -1;
-				}
-				count--;
-			}
-			if (!count)
-				printf("!!!Check Data Command(%x) expired without condition met @%x=%x mask %x\n", flags, addr, val, mask);
-			else
-				printf("Check Data Command(%x) success @%x=%x mask %x\n", flags, addr, val, mask);
-
-			break;
-		}
-		default:
-			printf("Unknown sub tag, dcd[0] 0x%2x, dcd[3] 0x%2x\n", dcd[0], dcd[3]);
-					return -1;
-		}
-	}
-	return err;
+	return load_dcd(dev, dcd, m_length, 0x00910000);
 }
 
 static int get_dcd_range_old(struct old_app_header *hdr,
