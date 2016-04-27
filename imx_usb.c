@@ -169,32 +169,6 @@ static struct mach_id * imx_device(unsigned short vid, unsigned short pid, struc
 	return NULL;
 }
 
-
-static libusb_device *find_imx_dev(libusb_device **devs, struct mach_id **pp_id, struct mach_id *list)
-{
-	int i = 0;
-	struct mach_id *p;
-	for (;;) {
-		struct libusb_device_descriptor desc;
-		libusb_device *dev = devs[i++];
-		if (!dev)
-			break;
-		int r = libusb_get_device_descriptor(dev, &desc);
-		if (r < 0) {
-			fprintf(stderr, "failed to get device descriptor");
-			return NULL;
-		}
-		p = imx_device(desc.idVendor, desc.idProduct, list);
-		if (p) {
-			*pp_id = p;
-			return dev;
-		}
-	}
-	fprintf(stderr, "no matching USB device found\n");
-	*pp_id = NULL;
-	return NULL;
-}
-
 static libusb_device *find_imx_dev_on_address(libusb_device **devs, struct mach_id **pp_id, struct mach_id *list, struct usb_id *specific_usb_device)
 {
 	int i = 0;
@@ -218,15 +192,18 @@ static libusb_device *find_imx_dev_on_address(libusb_device **devs, struct mach_
 			return NULL;
 		}
 		//filter bus ids
-		if (((current_bus_number == specific_usb_device->bus_id ) && (specific_usb_device->bus_id >= 0))
-			|| ((current_device_address == specific_usb_device->device_id) && (specific_usb_device->device_id >= 0)))
-		{
-			p = imx_device(desc.idVendor, desc.idProduct, list);
-				if (p) {
+		p = imx_device(desc.idVendor, desc.idProduct, list);
+			if (p)
+			{
+				if (((current_bus_number == specific_usb_device->bus_id ) && (specific_usb_device->bus_id >= 0))
+					|| ((current_device_address == specific_usb_device->device_id) && (specific_usb_device->device_id >= 0))
+					|| ((specific_usb_device->bus_id < 0 ) && (specific_usb_device->device_id < 0)))
+				{
 					*pp_id = p;
 					return dev;
 				}
-		}
+			}
+
 
 	}
 	fprintf(stderr, "no matching USB device found\n");
@@ -503,20 +480,14 @@ int main(int argc, char * const argv[])
 
 	//print_devs(devs);
 	// if bus_id or device_id are not specified they have the preassigned value of -1
-	if ((bus_id == -1) && (device_id == -1))
-	{
-		dev = find_imx_dev(devs, &mach, list);
-	}
-	else
-	{
-		struct usb_id *usb_address = NULL;
-		usb_address =  malloc(sizeof(struct usb_id));
-		usb_address->bus_id = bus_id;
-		usb_address->device_id = device_id;
+	struct usb_id *usb_address = NULL;
+	usb_address =  malloc(sizeof(struct usb_id));
+	usb_address->bus_id = bus_id;
+	usb_address->device_id = device_id;
 
-		dev = find_imx_dev_on_address(devs, &mach, list, usb_address);
-		free(usb_address);
-	}
+	dev = find_imx_dev_on_address(devs, &mach, list, usb_address);
+	free(usb_address);
+
 	if (dev) {
 		err = libusb_open(dev, &h);
 		if (err)
