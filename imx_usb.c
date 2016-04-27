@@ -45,6 +45,12 @@ struct mach_id {
 	char file_name[256];
 };
 
+struct usb_id;
+struct usb_id {
+	int device_id;
+	int bus_id;
+};
+
 static void print_devs(libusb_device **devs)
 {
 	int j, k, l;
@@ -163,8 +169,7 @@ static struct mach_id * imx_device(unsigned short vid, unsigned short pid, struc
 	return NULL;
 }
 
-
-static libusb_device *find_imx_dev(libusb_device **devs, struct mach_id **pp_id, struct mach_id *list)
+static libusb_device *find_imx_dev_on_address(libusb_device **devs, struct mach_id **pp_id, struct mach_id *list, struct usb_id *specific_usb_device)
 {
 	int i = 0;
 	struct mach_id *p;
@@ -173,16 +178,33 @@ static libusb_device *find_imx_dev(libusb_device **devs, struct mach_id **pp_id,
 		libusb_device *dev = devs[i++];
 		if (!dev)
 			break;
+		int current_device_address = libusb_get_device_address(dev);
+		int current_bus_number = libusb_get_bus_number(dev);
+		if (debugmode)
+		{
+			printf("looping though device with Bus number %d\t", current_bus_number);
+			printf("port number %d\n",current_device_address);
+		}
+
 		int r = libusb_get_device_descriptor(dev, &desc);
 		if (r < 0) {
 			fprintf(stderr, "failed to get device descriptor");
 			return NULL;
 		}
+		//filter bus ids
 		p = imx_device(desc.idVendor, desc.idProduct, list);
-		if (p) {
-			*pp_id = p;
-			return dev;
-		}
+			if (p)
+			{
+				if (((current_bus_number == specific_usb_device->bus_id ) && (specific_usb_device->bus_id >= 0))
+					|| ((current_device_address == specific_usb_device->device_id) && (specific_usb_device->device_id >= 0))
+					|| ((specific_usb_device->bus_id < 0 ) && (specific_usb_device->device_id < 0)))
+				{
+					*pp_id = p;
+					return dev;
+				}
+			}
+
+
 	}
 	fprintf(stderr, "no matching USB device found\n");
 	*pp_id = NULL;
@@ -350,6 +372,8 @@ void print_usage(void)
 		"   -d --debugmode	Enable debug logs\n"
 		"   -c --configdir=DIR	Reading configuration directory from non standard\n"
 		"			directory.\n"
+		"   -b --bus        Specify the USB BUS ID e.g. --bus 1\n"
+		"   -i --deviceid   Specify the device ID to target specific device e.g. --deviceid 2"
 		"\n"
 		"And where [JOBS...] are\n"
 		"   FILE [-lLOADADDR] [-sSIZE] ...\n"
@@ -360,7 +384,7 @@ void print_usage(void)
 }
 
 int parse_opts(int argc, char * const *argv, char const **configdir,
-		int *verify, struct sdp_work **cmd_head)
+		int *verify, struct sdp_work **cmd_head, int *bus_id, int *device_id )
 {
 	int c;
 
@@ -369,6 +393,8 @@ int parse_opts(int argc, char * const *argv, char const **configdir,
 		{"debugmode",	no_argument, 		0, 'd' },
 		{"verify",	no_argument, 		0, 'v' },
 		{"configdir",	required_argument, 	0, 'c' },
+		{"bus", required_argument, 0, 'b'},
+		{"deviceid", required_argument , 0 , 'i'},
 		{0,		0,			0, 0 },
 	};
 
@@ -387,6 +413,13 @@ int parse_opts(int argc, char * const *argv, char const **configdir,
 			break;
 		case 'c':
 			*configdir = optarg;
+			break;
+		case 'b':
+			//convert to int
+			*bus_id = atoi(optarg);
+			break;
+		case 'i':
+			*device_id = atoi(optarg);
 			break;
 		}
 	}
@@ -420,8 +453,11 @@ int main(int argc, char * const argv[])
 	char const *conf;
 	char const *base_path = get_base_path(argv[0]);
 	char const *conf_path = SYSCONFDIR "/imx-loader.d/";
+	int bus_id = -1;
+	int device_id = -1;
+	//char const *conf_path =  "/imx-loader.d/";
 
-	err = parse_opts(argc, argv, &conf_path, &verify, &cmd_head);
+	err = parse_opts(argc, argv, &conf_path, &verify, &cmd_head, &bus_id, &device_id);
 	if (err < 0)
 		return -1;
 
@@ -442,8 +478,16 @@ int main(int argc, char * const argv[])
 	if (cnt < 0)
 		goto out;
 
-//	print_devs(devs);
-	dev = find_imx_dev(devs, &mach, list);
+	//print_devs(devs);
+	// if bus_id or device_id are not specified they have the preassigned value of -1
+	struct usb_id *usb_address = NULL;
+	usb_address =  malloc(sizeof(struct usb_id));
+	usb_address->bus_id = bus_id;
+	usb_address->device_id = device_id;
+
+	dev = find_imx_dev_on_address(devs, &mach, list, usb_address);
+	free(usb_address);
+
 	if (dev) {
 		err = libusb_open(dev, &h);
 		if (err)
