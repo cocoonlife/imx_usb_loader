@@ -51,6 +51,7 @@ struct usb_id {
 	int bus_id;
 };
 
+
 static void print_devs(libusb_device **devs)
 {
 	int j, k, l;
@@ -195,16 +196,15 @@ static libusb_device *find_imx_dev_on_address(libusb_device **devs, struct mach_
 		p = imx_device(desc.idVendor, desc.idProduct, list);
 			if (p)
 			{
-				if (((current_bus_number == specific_usb_device->bus_id ) && (specific_usb_device->bus_id >= 0))
-					|| ((current_device_address == specific_usb_device->device_id) && (specific_usb_device->device_id >= 0))
-					|| ((specific_usb_device->bus_id < 0 ) && (specific_usb_device->device_id < 0)))
+				if (((current_bus_number == specific_usb_device->bus_id ) && (specific_usb_device->bus_id > 0) && (specific_usb_device->device_id < 0))
+					|| ((current_device_address == specific_usb_device->device_id) && (specific_usb_device->device_id > 0) && (specific_usb_device->bus_id < 0))
+					|| ((specific_usb_device->bus_id >= 0) && (specific_usb_device->device_id >= 0)  && (current_bus_number == specific_usb_device->bus_id ) && (current_device_address == specific_usb_device->device_id))
+					|| ((specific_usb_device->bus_id == -1 ) && (specific_usb_device->device_id == -1)))
 				{
 					*pp_id = p;
 					return dev;
 				}
 			}
-
-
 	}
 	fprintf(stderr, "no matching USB device found\n");
 	*pp_id = NULL;
@@ -488,6 +488,7 @@ int main(int argc, char * const argv[])
 	dev = find_imx_dev_on_address(devs, &mach, list, usb_address);
 	free(usb_address);
 
+
 	if (dev) {
 		err = libusb_open(dev, &h);
 		if (err)
@@ -497,6 +498,7 @@ int main(int argc, char * const argv[])
 
 	if (!h)
 		goto out;
+
 
 	// Get machine specific configuration file..
 	conf = conf_file_name(mach->file_name, base_path, conf_path);
@@ -590,5 +592,6 @@ out:
 	if (h)
 		libusb_close(h);
 	libusb_exit(NULL);
-	return 0;
+	if (dev ==0 ) 	return 1;
+	else 			return 0;
 }
